@@ -1,0 +1,342 @@
+function main() {
+  // --- Configuration ---
+  // IMPORTANT: REPLACE 'YOUR_ONEPAGER_URL_SHEET' with the actual ONEPAGER URL of your Google Sheet.
+  const SPREADSHEET_URL = 'YOUR_ONEPAGER_URL_SHEET'; // This is your main reporting spreadsheet
+
+  // --- NEW: Configuration for the PMax Placement Source Spreadsheet ---
+  // IMPORTANT: REPLACE 'URL_OF_PMAXSCRIPT_OUTPUT_SPREADSHEET_HERE' with the URL of the spreadsheet
+  //            where your other script outputs PMax placement data.
+  const SOURCE_PMAX_SPREADSHEET_URL = 'URL_OF_PMAXSCRIPT_OUTPUT_SPREADSHEET_HERE';
+  // IMPORTANT: REPLACE 'PMax_Source_Sheet_Name' with the actual name of the sheet (tab)
+  //            in the SOURCE_PMAX_SPREADSHEET_URL that contains the placement data.
+  const SOURCE_PMAX_SHEET_NAME = 'Campaigns'; // e.g., 'Placements Output' or 'Sheet1'
+
+  // --- Sheet Names (in YOUR_SPREADSHEET_URL) ---
+  const CAMPAIGN_SHEET_NAME = 'Campaign Performance Dump';
+  const ITEM_ID_SHEET_NAME = 'item-id Dump';
+  const PMAX_PLACEMENT_DUMP_SHEET_NAME = 'PMAX Placements Dump'; // New sheet in your main report
+
+  // --- USER CONFIGURATION: CHOOSE DATE RANGE (for Ads API data) ---
+  const NUMBER_OF_DAYS = 91; // Choose either 91 or 365 ONLY
+
+  // --- Internal Date Range Calculation ---
+  const now = new Date();
+  const timezone = AdsApp.currentAccount().getTimeZone();
+
+  function formatDateForGAQL(date) {
+    return Utilities.formatDate(date, timezone, 'yyyy-MM-dd');
+  }
+
+  const todayFormattedString = formatDateForGAQL(now);
+  const todayDate = new Date(todayFormattedString + 'T00:00:00');
+
+  const currentPeriodEndDate = new Date(todayDate);
+  const currentPeriodStartDate = new Date(todayDate);
+  currentPeriodStartDate.setDate(currentPeriodStartDate.getDate() - (NUMBER_OF_DAYS - 1));
+
+  const previousPeriodEndDate = new Date(currentPeriodStartDate);
+  previousPeriodEndDate.setDate(previousPeriodEndDate.getDate() - 1);
+
+  const previousPeriodStartDate = new Date(previousPeriodEndDate);
+  previousPeriodStartDate.setDate(previousPeriodStartDate.getDate() - (NUMBER_OF_DAYS - 1));
+
+  Logger.log(`Current Period Start Date: ${formatDateForGAQL(currentPeriodStartDate)}`);
+  Logger.log(`Current Period End Date: ${formatDateForGAQL(currentPeriodEndDate)}`);
+  Logger.log(`Previous Period Start Date: ${formatDateForGAQL(previousPeriodStartDate)}`);
+  Logger.log(`Previous Period End Date: ${formatDateForGAQL(previousPeriodEndDate)}`);
+
+  // --- Access the Main Google Spreadsheet ---
+  let mainSpreadsheet;
+  try {
+    mainSpreadsheet = SpreadsheetApp.openByUrl(SPREADSHEET_URL);
+  } catch (e) {
+    const errorMessage = `Error opening main spreadsheet: ${e.message}. Make sure the URL is correct and the script has access. Script terminated.`;
+    Logger.log(errorMessage);
+    throw new Error(errorMessage);
+  }
+
+  // --- Process Campaign Performance Data ---
+  processCampaignData(mainSpreadsheet, CAMPAIGN_SHEET_NAME, currentPeriodStartDate, currentPeriodEndDate, previousPeriodStartDate, previousPeriodEndDate);
+
+  // --- Process Item ID Performance Data ---
+  processItemIdData(mainSpreadsheet, ITEM_ID_SHEET_NAME, currentPeriodStartDate, currentPeriodEndDate, previousPeriodStartDate, previousPeriodEndDate);
+
+  // --- Process PMax Placement Data from another spreadsheet ---
+  processPmaxPlacementData(mainSpreadsheet, PMAX_PLACEMENT_DUMP_SHEET_NAME, SOURCE_PMAX_SPREADSHEET_URL, SOURCE_PMAX_SHEET_NAME);
+
+  Logger.log(`Script execution finished successfully for ${SPREADSHEET_URL}`);
+}
+
+// --- Function to Process and Dump Campaign Performance Data ---
+// (This function remains the same as before)
+function processCampaignData(spreadsheet, sheetName, currentPeriodStartDate, currentPeriodEndDate, previousPeriodStartDate, previousPeriodEndDate) {
+  Logger.log(`--- Starting Campaign Performance Data Processing for sheet: ${sheetName} ---`);
+  let sheet = spreadsheet.getSheetByName(sheetName);
+  if (!sheet) {
+    sheet = spreadsheet.insertSheet(sheetName);
+    Logger.log(`Sheet "${sheetName}" not found, created a new one. Remember to add headers.`);
+  }
+
+  const targetColumnsCount = 14; // A to N
+  const lastRow = sheet.getLastRow();
+  if (lastRow > 1) {
+    sheet.getRange(2, 1, lastRow - 1, targetColumnsCount).clearContent();
+    Logger.log(`Cleared previous campaign data from A2 to column ${String.fromCharCode(64 + targetColumnsCount)}${lastRow}`);
+  }
+
+  const currentQuery = "SELECT campaign.name, campaign.status, campaign.advertising_channel_type, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions, metrics.conversions_value, campaign.network_settings.target_content_network, campaign.network_settings.target_youtube, campaign.network_settings.target_partner_search_network FROM campaign WHERE segments.date >= '" + formatDateForGAQL(currentPeriodStartDate) + "' AND segments.date <= '" + formatDateForGAQL(currentPeriodEndDate) + "' ORDER BY campaign.name";
+  const previousQuery = "SELECT campaign.name, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions, metrics.conversions_value FROM campaign WHERE segments.date >= '" + formatDateForGAQL(previousPeriodStartDate) + "' AND segments.date <= '" + formatDateForGAQL(previousPeriodEndDate) + "' ORDER BY campaign.name";
+
+  // Logger.log(`Campaign - Current Period GAQL Query: ${currentQuery}`);
+  // Logger.log(`Campaign - Previous Period GAQL Query: ${previousQuery}`);
+
+  try {
+    const report = AdsApp.report(currentQuery);
+    const previousReport = AdsApp.report(previousQuery);
+
+    const rows = report.rows();
+    const previousRows = previousReport.rows();
+    const dataToWrite = [];
+    const previousPeriodMap = new Map();
+
+    while (previousRows.hasNext()) {
+      const row = previousRows.next();
+      previousPeriodMap.set(row['campaign.name'], {
+        impressions: row['metrics.impressions'],
+        clicks: row['metrics.clicks'],
+        cost: row['metrics.cost_micros'],
+        conversions: row['metrics.conversions'],
+        conversions_value: row['metrics.conversions_value']
+      });
+    }
+
+    while (rows.hasNext()) {
+      const row = rows.next();
+      const campaignName = row['campaign.name'];
+      const previousData = previousPeriodMap.get(campaignName) || {};
+
+      let networkString;
+      const channelType = row['campaign.advertising_channel_type'];
+      if (channelType === 'SEARCH') {
+          networkString = 'Search Network';
+          if (row['campaign.network_settings.target_partner_search_network']) {
+              networkString += ' (with Search Partners)';
+          }
+      } else if (channelType === 'DISPLAY') {
+          networkString = 'Display Network';
+      } else if (channelType === 'VIDEO') {
+          networkString = 'Video (YouTube) Network';
+      } else if (channelType === 'SHOPPING') {
+          networkString = 'Shopping Network';
+      } else if (channelType === 'APP') {
+          networkString = 'App Campaigns';
+      } else if (channelType === 'DISCOVERY') {
+          networkString = 'Discovery Network';
+      } else if (channelType === 'PERFORMANCE_MAX') {
+          networkString = 'Cross-network';
+      } else {
+          networkString = channelType + ' (Unknown)';
+      }
+
+      dataToWrite.push([
+        campaignName,
+        row['campaign.status'],
+        row['campaign.advertising_channel_type'],
+        networkString,
+        row['metrics.impressions'],
+        previousData.impressions || 0,
+        row['metrics.clicks'],
+        previousData.clicks || 0,
+        (row['metrics.cost_micros'] / 1000000).toFixed(2),
+        (previousData.cost ? previousData.cost / 1000000 : 0).toFixed(2),
+        row['metrics.conversions'],
+        previousData.conversions || 0,
+        row['metrics.conversions_value'] || 0,
+        previousData.conversions_value || 0,
+      ]);
+    }
+
+    if (dataToWrite.length > 0) {
+      sheet.getRange(2, 1, dataToWrite.length, targetColumnsCount).setValues(dataToWrite);
+      Logger.log(`Successfully dumped ${dataToWrite.length} rows of campaign performance data to ${sheetName}`);
+    } else {
+      Logger.log(`No campaign data found for sheet ${sheetName} for the specified period.`);
+    }
+  } catch (e) {
+    Logger.log(`Error running report or exporting data for campaigns: ${e.message}`);
+  }
+  Logger.log(`--- Finished Campaign Performance Data Processing for sheet: ${sheetName} ---`);
+}
+
+// --- Function to Process and Dump Item ID Performance Data ---
+// (This function remains the same as before)
+function processItemIdData(spreadsheet, sheetName, currentPeriodStartDate, currentPeriodEndDate, previousPeriodStartDate, previousPeriodEndDate) {
+  Logger.log(`--- Starting Item ID Performance Data Processing for sheet: ${sheetName} ---`);
+  let sheet = spreadsheet.getSheetByName(sheetName);
+  if (!sheet) {
+    sheet = spreadsheet.insertSheet(sheetName);
+    Logger.log(`Sheet "${sheetName}" not found, created a new one. Remember to add headers: [Item ID, Impressions, Last Period Impressions, Clicks, Last Period Clicks, Cost, Last Period Cost, Conversions, Last Period Conversions, Total conversion value, Last Period Total conversion value]`);
+  }
+
+  const targetColumnsCount = 11; // A to K
+  const lastRow = sheet.getLastRow();
+  if (lastRow > 1) {
+    sheet.getRange(2, 1, lastRow - 1, targetColumnsCount).clearContent();
+    Logger.log(`Cleared previous Item ID data from A2 to column ${String.fromCharCode(64 + targetColumnsCount)}${lastRow}`);
+  }
+
+  const commonFields = "segments.product_item_id, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions, metrics.conversions_value";
+  const currentQuery = `SELECT ${commonFields} FROM shopping_performance_view WHERE segments.date >= '${formatDateForGAQL(currentPeriodStartDate)}' AND segments.date <= '${formatDateForGAQL(currentPeriodEndDate)}' ORDER BY segments.product_item_id`;
+  const previousQuery = `SELECT ${commonFields} FROM shopping_performance_view WHERE segments.date >= '${formatDateForGAQL(previousPeriodStartDate)}' AND segments.date <= '${formatDateForGAQL(previousPeriodEndDate)}' ORDER BY segments.product_item_id`;
+
+  // Logger.log(`Item ID - Current Period GAQL Query: ${currentQuery}`);
+  // Logger.log(`Item ID - Previous Period GAQL Query: ${previousQuery}`);
+
+  try {
+    const report = AdsApp.report(currentQuery);
+    const previousReport = AdsApp.report(previousQuery);
+
+    const rows = report.rows();
+    const previousRows = previousReport.rows();
+    const dataToWrite = [];
+    const previousPeriodMap = new Map();
+
+    while (previousRows.hasNext()) {
+      const row = previousRows.next();
+      previousPeriodMap.set(row['segments.product_item_id'], {
+        impressions: row['metrics.impressions'],
+        clicks: row['metrics.clicks'],
+        cost: row['metrics.cost_micros'],
+        conversions: row['metrics.conversions'],
+        conversions_value: row['metrics.conversions_value']
+      });
+    }
+
+    while (rows.hasNext()) {
+      const row = rows.next();
+      const itemId = row['segments.product_item_id'];
+      if (!itemId) {
+          Logger.log("Skipping row with undefined or null Item ID for ItemID dump.");
+          continue;
+      }
+      const previousData = previousPeriodMap.get(itemId) || {};
+
+      dataToWrite.push([
+        itemId,
+        row['metrics.impressions'],
+        previousData.impressions || 0,
+        row['metrics.clicks'],
+        previousData.clicks || 0,
+        (row['metrics.cost_micros'] / 1000000).toFixed(2),
+        (previousData.cost ? previousData.cost / 1000000 : 0).toFixed(2),
+        row['metrics.conversions'],
+        previousData.conversions || 0,
+        row['metrics.conversions_value'] || 0,
+        previousData.conversions_value || 0,
+      ]);
+    }
+
+    if (dataToWrite.length > 0) {
+      sheet.getRange(2, 1, dataToWrite.length, targetColumnsCount).setValues(dataToWrite);
+      Logger.log(`Successfully dumped ${dataToWrite.length} rows of Item ID performance data to ${sheetName}`);
+    } else {
+      Logger.log(`No Item ID data found for sheet ${sheetName} for the specified period.`);
+    }
+  } catch (e) {
+    Logger.log(`Error running report or exporting data for Item IDs: ${e.message}.`);
+  }
+  Logger.log(`--- Finished Item ID Performance Data Processing for sheet: ${sheetName} ---`);
+}
+
+
+// --- NEW Function: Process and Dump PMax Placement Data from another Spreadsheet ---
+function processPmaxPlacementData(targetMainSpreadsheet, targetPmaxSheetName, sourcePmaxSpreadsheetUrl, sourcePmaxDataSheetName) {
+  Logger.log(`--- Starting PMax Placement Data Import ---`);
+  Logger.log(`Source Spreadsheet: ${sourcePmaxSpreadsheetUrl}, Source Sheet: ${sourcePmaxDataSheetName}`);
+  Logger.log(`Target Sheet in Main Report: ${targetPmaxSheetName}`);
+
+  let pmaxSourceSpreadsheet;
+  try {
+    pmaxSourceSpreadsheet = SpreadsheetApp.openByUrl(sourcePmaxSpreadsheetUrl);
+  } catch (e) {
+    Logger.log(`Error opening PMax source spreadsheet: ${sourcePmaxSpreadsheetUrl}. Error: ${e.message}. Skipping PMax placement dump.`);
+    return; // Exit this function if source spreadsheet can't be opened
+  }
+
+  const sourceSheet = pmaxSourceSpreadsheet.getSheetByName(sourcePmaxDataSheetName);
+  if (!sourceSheet) {
+    Logger.log(`PMax source sheet "${sourcePmaxDataSheetName}" not found in spreadsheet: ${sourcePmaxSpreadsheetUrl}. Skipping PMax placement dump.`);
+    return; // Exit this function if source sheet isn't found
+  }
+
+  // --- MODIFIED DATA FETCHING ---
+  // Get the entire data range from the source sheet.
+  const allSourceDataRange = sourceSheet.getDataRange();
+  const allSourceData = allSourceDataRange.getValues(); // Gets all values, including headers
+
+  if (!allSourceData || allSourceData.length <= 1) { // <= 1 to account for a header-only sheet
+    Logger.log(`No data (or only headers) found in PMax source sheet "${sourcePmaxDataSheetName}" at ${sourcePmaxSpreadsheetUrl}. Skipping PMax placement dump.`);
+    return;
+  }
+
+  // Extract data rows, skipping the first row (headers) from the source data.
+  // We assume the actual data to copy starts from the second row of the source sheet.
+  const dataToCopy = allSourceData.slice(1); // .slice(1) creates a new array from index 1 to the end
+
+  if (dataToCopy.length === 0 || (dataToCopy.length > 0 && dataToCopy[0].length === 0)) {
+      Logger.log(`No actual data rows (after skipping header) found in PMax source sheet "${sourcePmaxDataSheetName}". Skipping PMax placement dump.`);
+      return;
+  }
+  const numRowsToCopy = dataToCopy.length;
+  const numColsToCopy = dataToCopy[0].length; // Get number of columns from the first data row
+
+  Logger.log(`Found ${numRowsToCopy} data rows (after skipping header) and ${numColsToCopy} columns to copy from PMax source sheet.`);
+
+
+  // Prepare the target sheet in the main reporting spreadsheet
+  let targetPmaxSheet = targetMainSpreadsheet.getSheetByName(targetPmaxSheetName);
+  if (!targetPmaxSheet) {
+    targetPmaxSheet = targetMainSpreadsheet.insertSheet(targetPmaxSheetName);
+    Logger.log(`Sheet "${targetPmaxSheetName}" not found in target spreadsheet, created a new one. PLEASE ENSURE HEADERS ARE MANUALLY ADDED TO ROW 1.`);
+    // Since we're creating it, we expect you to add headers. We will write data from row 2.
+  }
+
+  // --- MODIFIED CLEARING LOGIC ---
+  // Clear ONLY the data area (from row 2 downwards) in the target PMax sheet before pasting new data.
+  // This preserves the headers in row 1 of the target sheet.
+  const lastRowInTarget = targetPmaxSheet.getLastRow();
+  if (lastRowInTarget > 1) { // If there's any data beyond the header row
+    // Clear from row 2, column 1, for all rows that might have data, and for as many columns as we will paste
+    // It's safer to clear at least the number of columns we are about to paste, or more if known.
+    // If the old data had more columns than new data, this might leave some old columns.
+    // To be perfectly clean, we could get lastColumn too, or clear a fixed wide range.
+    // For now, let's clear up to the max number of columns expected based on the new data.
+    const lastColInTarget = targetPmaxSheet.getLastColumn();
+    const columnsToClear = Math.max(numColsToCopy, lastColInTarget > 0 ? lastColInTarget : numColsToCopy);
+    targetPmaxSheet.getRange(2, 1, lastRowInTarget - 1, columnsToClear).clearContent();
+    Logger.log(`Cleared previous data from row 2 downwards in target sheet "${targetPmaxSheetName}".`);
+  }
+
+
+  // --- MODIFIED WRITING LOGIC ---
+  // Write the dataToCopy (which excludes source headers) to the target PMax sheet,
+  // starting at row 2, column 1.
+  try {
+    targetPmaxSheet.getRange(2, 1, numRowsToCopy, numColsToCopy).setValues(dataToCopy);
+    Logger.log(`Successfully copied ${numRowsToCopy} rows of PMax placement data to ${targetPmaxSheetName} starting at row 2.`);
+  } catch (e) {
+    Logger.log(`Error writing PMax placement data to sheet "${targetPmaxSheetName}". Error: ${e.message}`);
+  }
+  Logger.log(`--- Finished PMax Placement Data Import for sheet: ${targetPmaxSheetName} ---`);
+}
+
+
+// Helper function to format dates for GAQL
+// Defined within scope of other functions needing it (Campaign and Item ID)
+// Or could be moved to global scope if timezone is handled consistently.
+function formatDateForGAQL(date) {
+    // Re-getting timezone for robustness if functions were ever called standalone.
+    // In this script structure, it would inherit from main's scope.
+    const timezone = AdsApp.currentAccount().getTimeZone();
+    return Utilities.formatDate(date, timezone, 'yyyy-MM-dd');
+}
