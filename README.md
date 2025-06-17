@@ -17,6 +17,7 @@ A Google Ads Script to automate the consolidation and reporting of campaign, ite
 ## Prerequisites
 
 - Access to [Google Ads Scripts](https://ads.google.com/aw/scripts/).
+- You need to have the PMAX Script already ran here in order to fill up PMAX data, if you do not have it setup in the script it will dump the item-id and campaigns anyways.
 - Two Google Sheets:
   - **Main Reporting Spreadsheet** (where this script writes all outputs).
   - **PMax Placement Data Spreadsheet** (where your other script outputs PMax placement data).
